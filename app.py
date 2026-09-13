@@ -134,6 +134,56 @@ def make_text_element(shape, slide_w, slide_h):
     return element
 
 
+
+def table_cell_html(cell):
+    """Zet de inhoud van één PowerPoint-tabelcel om naar HTML."""
+    if not getattr(cell, "text_frame", None):
+        return ""
+    return text_frame_html(cell.text_frame)
+
+
+def make_table_element(shape, slide_w, slide_h):
+    """Zet een PowerPoint-tabel om naar een bewerkbare H5P AdvancedText HTML-tabel."""
+    table = shape.table
+    rows_html = []
+
+    for row_idx, row in enumerate(table.rows):
+        cells_html = []
+        tag = "th" if row_idx == 0 else "td"
+        for cell in row.cells:
+            body = table_cell_html(cell)
+            # H5P/CKEditor kan eenvoudige HTML-tabellen bewerken.
+            cells_html.append(
+                f'<{tag} style="border:1px solid #999;padding:6px;vertical-align:top">{body}</{tag}>'
+            )
+        rows_html.append("<tr>" + "".join(cells_html) + "</tr>")
+
+    table_html = (
+        '<table style="border-collapse:collapse;width:100%">'
+        + "".join(rows_html)
+        + "</table>"
+    )
+
+    x = pct(shape.left, slide_w)
+    y = pct(shape.top, slide_h)
+    w = pct(shape.width, slide_w)
+    h = pct(shape.height, slide_h)
+
+    element = common_element_fields(x, y, w, h)
+    element["action"] = {
+        "library": "H5P.AdvancedText 1.1",
+        "params": {"text": table_html},
+        "subContentId": str(uuid.uuid4()),
+        "metadata": {
+            "contentType": "Text",
+            "license": "U",
+            "title": shape.name or "PowerPoint tabel",
+            "authors": [],
+            "changes": [],
+        },
+    }
+    return element
+
 def make_image_element(
     shape,
     slide_w,
@@ -260,6 +310,7 @@ def convert_pptx_to_h5p(pptx_bytes, template_bytes, pptx_name):
             "slides": len(prs.slides),
             "tekst": 0,
             "afbeelding": 0,
+            "tabel": 0,
             "overgeslagen": 0,
         }
 
@@ -272,7 +323,17 @@ def convert_pptx_to_h5p(pptx_bytes, template_bytes, pptx_name):
             # python-pptx geeft shapes in z-volgorde terug.
             for shape in slide.shapes:
                 try:
-                    if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                    if getattr(shape, "has_table", False):
+                        elements.append(
+                            make_table_element(
+                                shape,
+                                slide_w,
+                                slide_h,
+                            )
+                        )
+                        stats["tabel"] += 1
+
+                    elif shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
                         image_no += 1
                         elements.append(
                             make_image_element(
@@ -370,12 +431,12 @@ st.title("PowerPoint → H5P Course Presentation")
 
 st.write(
     "Zet een PowerPoint om naar een bewerkbare H5P Course Presentation. "
-    "Tekstvakken en afbeeldingen worden als afzonderlijke H5P-elementen geplaatst."
+    "Tekstvakken, afbeeldingen en tabellen worden als afzonderlijke H5P-elementen geplaatst."
 )
 
 st.info(
-    "Momenteel worden tekst en afbeeldingen ondersteund. "
-    "SmartArt, tabellen, grafieken, vormen en animaties worden voorlopig overgeslagen."
+    "Momenteel worden tekst, afbeeldingen en tabellen ondersteund. "
+    "SmartArt, grafieken, vormen en animaties worden voorlopig overgeslagen."
 )
 
 st.subheader("1. PowerPoint")
@@ -469,12 +530,13 @@ if "h5p_bytes" in st.session_state:
 
     stats = st.session_state["stats"]
 
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
 
     col1.metric("Dia's", stats["slides"])
     col2.metric("Tekst", stats["tekst"])
     col3.metric("Afbeeldingen", stats["afbeelding"])
-    col4.metric("Overgeslagen", stats["overgeslagen"])
+    col4.metric("Tabellen", stats["tabel"])
+    col5.metric("Overgeslagen", stats["overgeslagen"])
 
     st.caption(
         f"Gebruikt template: {st.session_state['template_name']}"
