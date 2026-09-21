@@ -147,49 +147,20 @@ def _rgb(color, fallback):
 
 
 def _font(size, bold=False):
-    """Zoek een schaalbaar standaardlettertype dat op de server aanwezig is."""
-    from functools import lru_cache
-    return _system_font(max(9, int(size)), bold)
+    """Gebruik het lettertype uit de GitHub-map fonts (geen serverfonts nodig)."""
+    fonts_dir = APP_DIR / "fonts"
+    regular = fonts_dir / "DejaVuSans.ttf"
+    heavy = fonts_dir / "DejaVuSans-Bold.ttf"
 
+    if not regular.is_file():
+        raise FileNotFoundError(
+            "Lettertype ontbreekt: upload DejaVuSans.ttf naar de map fonts "
+            "in je GitHub-project (fonts/DejaVuSans.ttf)."
+        )
 
-@__import__("functools").lru_cache(maxsize=64)
-def _system_font(size, bold=False):
-    # Streamlit Community Cloud kan andere fonts hebben dan een lokale computer.
-    # Probeer gangbare systeemfonts, zonder een specifiek font te vereisen.
-    names = (
-        ["LiberationSans-Bold.ttf", "DejaVuSans-Bold.ttf", "Lato-Bold.ttf",
-         "NotoSans-Bold.ttf", "Arial-Bold.ttf"] if bold else
-        ["LiberationSans-Regular.ttf", "DejaVuSans.ttf", "Lato-Regular.ttf",
-         "NotoSans-Regular.ttf", "Arial.ttf"]
-    )
-    roots = [Path("/usr/share/fonts"), Path("/usr/local/share/fonts"),
-             Path.home() / ".fonts", Path.home() / ".local/share/fonts"]
-    for name in names:
-        try:
-            return ImageFont.truetype(name, size)
-        except (OSError, ValueError):
-            pass
-        for root in roots:
-            if root.is_dir():
-                for candidate in root.rglob(name):
-                    try:
-                        return ImageFont.truetype(str(candidate), size)
-                    except (OSError, ValueError):
-                        pass
-    # Laatste uitweg: ieder beschikbaar schaalbaar font (nooit load_default,
-    # want dat kan een klein bitmapfont zijn dat de gevraagde grootte negeert).
-    for root in roots:
-        if root.is_dir():
-            for pattern in ("*.ttf", "*.otf"):
-                for candidate in root.rglob(pattern):
-                    try:
-                        return ImageFont.truetype(str(candidate), size)
-                    except (OSError, ValueError):
-                        pass
-    raise RuntimeError(
-        "Er is geen schaalbaar systeemlettertype (.ttf/.otf) gevonden op de "
-        "Streamlit-server. Voeg een font toe aan de serveromgeving."
-    )
+    # Het vetgedrukte bestand is optioneel: gebruik anders het gewone font.
+    chosen = heavy if bold and heavy.is_file() else regular
+    return ImageFont.truetype(str(chosen), max(9, int(size)))
 
 
 def _wrap_text(draw, text, font, max_width):
@@ -540,7 +511,7 @@ def convert_pptx_to_h5p(pptx_bytes, template_bytes, pptx_name):
 # ---------------------------------------------------------
 
 st.title("PowerPoint → H5P Course Presentation")
-st.caption("Versie 1.5 – automatisch systeemlettertype")
+st.caption("Versie 1.6 – tabellettertype uit fonts-map")
 
 st.write(
     "Zet een PowerPoint om naar een bewerkbare H5P Course Presentation. "
