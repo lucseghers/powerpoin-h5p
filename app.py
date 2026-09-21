@@ -336,6 +336,68 @@ def make_image_element(
     return element
 
 
+def make_slide_background(slide, slide_w, slide_h, images_dir, slide_no):
+    """Maak een achtergrondafbeelding van een expliciete PowerPoint-dia-achtergrond.
+
+    Ondersteunt effen kleuren en ingesloten achtergrondafbeeldingen; laat anders
+    het bestaande H5P-template zichtbaar. De achtergrond is het eerste element.
+    """
+    from pptx.enum.dml import MSO_FILL_TYPE
+    from pptx.opc.constants import RELATIONSHIP_TYPE as RT
+
+    fill = slide.background.fill
+    # Sommige presentaties gebruiken een achtergrond uit de dia-indeling/master.
+    if fill.type not in (MSO_FILL_TYPE.SOLID, MSO_FILL_TYPE.PICTURE):
+        for parent in (slide.slide_layout, slide.slide_layout.slide_master):
+            candidate = parent.background.fill
+            if candidate.type in (MSO_FILL_TYPE.SOLID, MSO_FILL_TYPE.PICTURE):
+                fill = candidate
+                slide = parent
+                break
+        else:
+            return None
+
+    if fill.type == MSO_FILL_TYPE.SOLID:
+        color = _rgb(fill.fore_color, None)
+        if color is None:
+            return None  # Themakleuren zonder expliciete RGB: template behouden.
+        background = Image.new("RGB", (1600, 900), color)
+    else:
+        # Lees de achtergrondafbeelding uit de PowerPoint-relaties.
+        blips = fill._xPr.xpath('.//a:blip')
+        if not blips:
+            return None
+        rid = blips[0].get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
+        if not rid:
+            return None
+        image_part = slide.part.related_part(rid)
+        with Image.open(io.BytesIO(image_part.blob)) as original:
+            background = original.convert("RGB").resize((1600, 900), Image.Resampling.LANCZOS)
+
+    name = f"ppt_s{slide_no:03d}_background.png"
+    background.save(images_dir / name, format="PNG")
+    element = common_element_fields(0, 0, 100, 100)
+    element["action"] = {
+        "library": "H5P.Image 1.1",
+        "params": {
+            "decorative": True,
+            "contentName": "Image",
+            "file": {
+                "path": f"images/{name}", "mime": "image/png",
+                "copyright": {"license": "U"},
+                "width": 1600, "height": 900,
+            },
+        },
+        "subContentId": str(uuid.uuid4()),
+        "metadata": {
+            "contentType": "Image", "license": "U",
+            "title": f"Achtergrond dia {slide_no}",
+            "authors": [], "changes": [],
+        },
+    }
+    return element
+
+
 def convert_pptx_to_h5p(pptx_bytes, template_bytes, pptx_name):
     workdir = Path(tempfile.mkdtemp(prefix="ppt_streamlit_h5p_"))
 
@@ -396,6 +458,14 @@ def convert_pptx_to_h5p(pptx_bytes, template_bytes, pptx_name):
 
         for slide_no, slide in enumerate(prs.slides, start=1):
             elements = []
+            try:
+                background_element = make_slide_background(
+                    slide, slide_w, slide_h, images_dir, slide_no
+                )
+                if background_element is not None:
+                    elements.append(background_element)
+            except Exception as exc:
+                warnings.append(f"Dia {slide_no} – achtergrond: {exc}")
             image_no = 0
             table_no = 0
 
@@ -515,7 +585,8 @@ st.caption("Versie 1.6 – tabellettertype uit fonts-map")
 
 st.write(
     "Zet een PowerPoint om naar een bewerkbare H5P Course Presentation. "
-    "Tekstvakken en afbeeldingen blijven afzonderlijke H5P-elementen; tabellen worden als PNG overgenomen."
+    "Tekstvakken en afbeeldingen blijven afzonderlijke H5P-elementen; tabellen worden als PNG overgenomen. "
+    "Effen dia-achtergronden en ingesloten achtergrondafbeeldingen worden mee overgenomen."
 )
 
 st.info(
