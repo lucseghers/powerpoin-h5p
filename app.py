@@ -147,12 +147,25 @@ def _rgb(color, fallback):
 
 
 def _font(size, bold=False):
-    regular = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-    heavy = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-    try:
-        return ImageFont.truetype(heavy if bold else regular, max(9, int(size)))
-    except OSError:
-        return ImageFont.load_default()
+    """Gebruik altijd een schaalbaar TrueType-lettertype; nooit het mini bitmapfont."""
+    import PIL
+    font_name = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
+    candidates = [
+        Path(PIL.__file__).resolve().parent / "fonts" / font_name,
+        Path("/usr/share/fonts/truetype/dejavu") / font_name,
+        Path("/usr/local/share/fonts") / font_name,
+        font_name,  # Pillow kan DejaVuSans op sommige systemen zelf vinden
+    ]
+    for candidate in candidates:
+        try:
+            return ImageFont.truetype(str(candidate), max(9, int(size)))
+        except (OSError, ValueError):
+            continue
+    raise RuntimeError(
+        "Geen schaalbaar DejaVuSans-lettertype gevonden. "
+        "Installeer DejaVu Sans op de Streamlit-server. "
+        "De tabel wordt NIET met een onleesbaar klein standaardfont gemaakt."
+    )
 
 
 def _wrap_text(draw, text, font, max_width):
@@ -503,6 +516,7 @@ def convert_pptx_to_h5p(pptx_bytes, template_bytes, pptx_name):
 # ---------------------------------------------------------
 
 st.title("PowerPoint → H5P Course Presentation")
+st.caption("Versie 1.4 – tabellettertype gecontroleerd")
 
 st.write(
     "Zet een PowerPoint om naar een bewerkbare H5P Course Presentation. "
