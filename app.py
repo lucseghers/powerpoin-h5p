@@ -197,18 +197,19 @@ def render_table_png(shape, images_dir, slide_no, image_no):
             size_pt = run.font.size.pt if run and run.font.size else 12
             bold = bool(run.font.bold) if run else row_idx == 0
             foreground = _rgb(run.font.color if run else None, (255,255,255) if row_idx == 0 else (45,52,55))
-            pad = max(6, round(0.10 * 150))
+            pad = 8  # Minder witruimte: meer plaats voor leesbare tekst
             available_width = max(1, w-2*pad)
             available_height = max(1, h-2*pad)
-            font_px = min(36, max(10, round(size_pt * 150 / 72)))
+            font_px = min(48, max(22, round(size_pt * 150 / 72 * 1.55)))
+            min_font_px = 19  # Vermijd onleesbaar kleine letters
             while True:
                 font = _font(font_px, bold)
                 lines = _wrap_text(draw, cell.text, font, available_width)
-                line_height = max(1, round(font_px * 1.30))
-                if len(lines)*line_height <= available_height or font_px <= 10:
+                line_height = max(1, round(font_px * 1.15))
+                if len(lines)*line_height <= available_height or font_px <= min_font_px:
                     break
                 font_px -= 1
-            text_y = y + max(pad, (h-len(lines)*line_height)//2)
+            text_y = y + max(2, (h-len(lines)*line_height)//2)
             for line in lines:
                 draw.text((x+pad, text_y), line, font=font, fill=foreground)
                 text_y += line_height
