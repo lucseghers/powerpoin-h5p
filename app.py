@@ -336,46 +336,55 @@ def make_image_element(
     return element
 
 
-def make_slide_background(slide, slide_w, slide_h, images_dir, slide_no):
-    """Maak een achtergrondafbeelding van een expliciete PowerPoint-dia-achtergrond.
-
-    Ondersteunt effen kleuren en ingesloten achtergrondafbeeldingen; laat anders
-    het bestaande H5P-template zichtbaar. De achtergrond is het eerste element.
-    """
+def background_kind(slide):
+    """Herken expliciete effen RGB-kleur; geen betrouwbare herkenning van complexe masters."""
     from pptx.enum.dml import MSO_FILL_TYPE
-    from pptx.opc.constants import RELATIONSHIP_TYPE as RT
+    for owner in (slide, slide.slide_layout, slide.slide_layout.slide_master):
+        fill = owner.background.fill
+        if fill.type == MSO_FILL_TYPE.SOLID:
+            rgb = _rgb(fill.fore_color, None)
+            if rgb is None:
+                return None
+            r, g, b = rgb
+            if g > r * 1.16 and g > b * 1.12:
+                return "groen"
+            if r > 115 and g > 95 and b < min(r, g) * 0.82:
+                return "geel"
+            return None
+    return None
 
-    fill = slide.background.fill
-    # Sommige presentaties gebruiken een achtergrond uit de dia-indeling/master.
-    if fill.type not in (MSO_FILL_TYPE.SOLID, MSO_FILL_TYPE.PICTURE):
-        for parent in (slide.slide_layout, slide.slide_layout.slide_master):
-            candidate = parent.background.fill
-            if candidate.type in (MSO_FILL_TYPE.SOLID, MSO_FILL_TYPE.PICTURE):
-                fill = candidate
-                slide = parent
-                break
+
+def parse_slide_numbers(spec, maximum):
+    """Bijvoorbeeld 1,3-5; een lege invoer betekent geen expliciete toewijzing."""
+    numbers = set()
+    for part in spec.replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start, end = part.split("-", 1)
+            if not start.strip().isdigit() or not end.strip().isdigit():
+                raise ValueError(f"Ongeldig diabereik: {part}")
+            start, end = int(start), int(end)
+            if start > end:
+                raise ValueError(f"Ongeldig diabereik: {part}")
+            numbers.update(range(start, end + 1))
+        elif part.isdigit():
+            numbers.add(int(part))
         else:
-            return None
+            raise ValueError(f"Ongeldig dianummer: {part}")
+    if any(n < 1 or n > maximum for n in numbers):
+        raise ValueError(f"Dianummers moeten tussen 1 en {maximum} liggen.")
+    return numbers
 
-    if fill.type == MSO_FILL_TYPE.SOLID:
-        color = _rgb(fill.fore_color, None)
-        if color is None:
-            return None  # Themakleuren zonder expliciete RGB: template behouden.
-        background = Image.new("RGB", (1600, 900), color)
-    else:
-        # Lees de achtergrondafbeelding uit de PowerPoint-relaties.
-        blips = fill._xPr.xpath('.//a:blip')
-        if not blips:
-            return None
-        rid = blips[0].get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed')
-        if not rid:
-            return None
-        image_part = slide.part.related_part(rid)
-        with Image.open(io.BytesIO(image_part.blob)) as original:
-            background = original.convert("RGB").resize((1600, 900), Image.Resampling.LANCZOS)
 
+def make_uploaded_background(image_bytes, images_dir, slide_no):
+    """Maak een achtergrond die exact de volledige H5P-dia bedekt."""
+    with Image.open(io.BytesIO(image_bytes)) as source:
+        image = source.convert("RGB")
+        image = image.resize((1600, 900), Image.Resampling.LANCZOS)
     name = f"ppt_s{slide_no:03d}_background.png"
-    background.save(images_dir / name, format="PNG")
+    image.save(images_dir / name, format="PNG")
     element = common_element_fields(0, 0, 100, 100)
     element["action"] = {
         "library": "H5P.Image 1.1",
@@ -398,7 +407,7 @@ def make_slide_background(slide, slide_w, slide_h, images_dir, slide_no):
     return element
 
 
-def convert_pptx_to_h5p(pptx_bytes, template_bytes, pptx_name):
+def convert_pptx_to_h5p(pptx_bytes, template_bytes, pptx_name, backgrounds=None, mode="manual", green_spec="", yellow_spec=""):
     workdir = Path(tempfile.mkdtemp(prefix="ppt_streamlit_h5p_"))
 
     try:
@@ -445,6 +454,12 @@ def convert_pptx_to_h5p(pptx_bytes, template_bytes, pptx_name):
         slide_w = prs.slide_width
         slide_h = prs.slide_height
 
+        backgrounds = backgrounds or {}
+        green_slides = parse_slide_numbers(green_spec, len(prs.slides)) if mode == "manual" else set()
+        yellow_slides = parse_slide_numbers(yellow_spec, len(prs.slides)) if mode == "manual" else set()
+        overlap = green_slides & yellow_slides
+        if overlap:
+            raise ValueError(f"Dia's mogen niet tegelijk groen en geel zijn: {sorted(overlap)}")
         new_slides = []
         stats = {
             "slides": len(prs.slides),
@@ -459,11 +474,14 @@ def convert_pptx_to_h5p(pptx_bytes, template_bytes, pptx_name):
         for slide_no, slide in enumerate(prs.slides, start=1):
             elements = []
             try:
-                background_element = make_slide_background(
-                    slide, slide_w, slide_h, images_dir, slide_no
-                )
-                if background_element is not None:
-                    elements.append(background_element)
+                if mode == "manual":
+                    kind = "groen" if slide_no in green_slides else "geel" if slide_no in yellow_slides else None
+                else:
+                    kind = background_kind(slide)
+                if kind and backgrounds.get(kind):
+                    elements.append(make_uploaded_background(backgrounds[kind], images_dir, slide_no))
+                elif kind and not backgrounds.get(kind):
+                    warnings.append(f"Dia {slide_no}: {kind} herkend/aangewezen, maar geen {kind}e afbeelding geüpload.")
             except Exception as exc:
                 warnings.append(f"Dia {slide_no} – achtergrond: {exc}")
             image_no = 0
@@ -581,12 +599,12 @@ def convert_pptx_to_h5p(pptx_bytes, template_bytes, pptx_name):
 # ---------------------------------------------------------
 
 st.title("PowerPoint → H5P Course Presentation")
-st.caption("Versie 1.6 – tabellettertype uit fonts-map")
+st.caption("Versie 1.7 – eigen achtergrondafbeeldingen per dia")
 
 st.write(
     "Zet een PowerPoint om naar een bewerkbare H5P Course Presentation. "
     "Tekstvakken en afbeeldingen blijven afzonderlijke H5P-elementen; tabellen worden als PNG overgenomen. "
-    "Effen dia-achtergronden en ingesloten achtergrondafbeeldingen worden mee overgenomen."
+    "Je kunt een eigen groene en gele achtergrond per dia toepassen."
 )
 
 st.info(
@@ -629,7 +647,19 @@ else:
         )
 
 
-st.subheader("3. Omzetten")
+st.subheader("3. Achtergrondafbeeldingen (optioneel)")
+st.caption("Upload PNG/JPG-afbeeldingen in dezelfde verhouding als je dia (bijvoorbeeld 16:9). De afbeeldingen komen achter de H5P-elementen.")
+green_file = st.file_uploader("Groene achtergrond", type=["png", "jpg", "jpeg"], key="green_bg")
+yellow_file = st.file_uploader("Gele achtergrond", type=["png", "jpg", "jpeg"], key="yellow_bg")
+mode = st.radio("Achtergronden toewijzen", ["Zelf dianummers opgeven", "Automatisch kleur herkennen"], index=0)
+green_spec = yellow_spec = ""
+if mode == "Zelf dianummers opgeven":
+    green_spec = st.text_input("Groene dia's", placeholder="Bijvoorbeeld: 1, 2, 5-7")
+    yellow_spec = st.text_input("Gele dia's", placeholder="Bijvoorbeeld: 3-4, 8, 10")
+else:
+    st.caption("Automatische herkenning werkt alleen voor herkenbare effen PowerPoint-achtergrondkleuren. Bij kleurvlakken of complexe diamodellen gebruik je best dianummers.")
+
+st.subheader("4. Omzetten")
 
 can_convert = (
     ppt_file is not None
@@ -667,6 +697,13 @@ if st.button(
                 pptx_bytes,
                 template_bytes,
                 ppt_file.name,
+                backgrounds={
+                    "groen": green_file.getvalue() if green_file else None,
+                    "geel": yellow_file.getvalue() if yellow_file else None,
+                },
+                mode="manual" if mode == "Zelf dianummers opgeven" else "auto",
+                green_spec=green_spec,
+                yellow_spec=yellow_spec,
             )
 
             st.session_state["h5p_bytes"] = h5p_bytes
