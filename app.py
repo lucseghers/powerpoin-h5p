@@ -175,9 +175,9 @@ def _wrap_text(draw, text, font, max_width):
 
 
 def render_table_png(shape, images_dir, slide_no, image_no):
-    """Rasteriseer uitsluitend de tabel, niet de volledige dia."""
+    """Tabel als PNG met leesbare, vaste tekstgrootte en regelafbreking."""
     table = shape.table
-    scale = 150 / 914400  # 150 pixels per inch (EMU)
+    scale = 150 / 914400
     widths = [max(1, round(col.width * scale)) for col in table.columns]
     heights = [max(1, round(row.height * scale)) for row in table.rows]
     image = Image.new("RGB", (sum(widths), sum(heights)), "white")
@@ -191,33 +191,36 @@ def render_table_png(shape, images_dir, slide_no, image_no):
                 fill = _rgb(cell.fill.fore_color, (255, 255, 255))
             except (AttributeError, TypeError, ValueError):
                 fill = (255, 255, 255)
-            draw.rectangle((x, y, x+w-1, y+h-1), fill=fill, outline=(230, 235, 235), width=1)
+            draw.rectangle((x, y, x + w - 1, y + h - 1),
+                           fill=fill, outline=(230, 235, 235), width=1)
             paragraph = next((p for p in cell.text_frame.paragraphs if p.text.strip()), None)
             run = next((r for r in paragraph.runs if r.text.strip()), None) if paragraph else None
-            size_pt = run.font.size.pt if run and run.font.size else 12
-            bold = bool(run.font.bold) if run else row_idx == 0
-            foreground = _rgb(run.font.color if run else None, (255,255,255) if row_idx == 0 else (45,52,55))
-            pad = 8  # Minder witruimte: meer plaats voor leesbare tekst
-            available_width = max(1, w-2*pad)
-            available_height = max(1, h-2*pad)
-            font_px = min(48, max(22, round(size_pt * 150 / 72 * 1.55)))
-            min_font_px = 19  # Vermijd onleesbaar kleine letters
-            while True:
+            bold = row_idx == 0 or (bool(run.font.bold) if run else False)
+            foreground = _rgb(run.font.color if run else None,
+                              (255, 255, 255) if row_idx == 0 else (45, 52, 55))
+            # Op 150 dpi wordt 30 px ongeveer 22 px op een H5P-dia van 1100 px breed.
+            # Geen automatische verkleining tot 10 px meer.
+            font_px = 32 if row_idx == 0 else 30
+            font = _font(font_px, bold)
+            pad_x, pad_y = 12, 5
+            lines = _wrap_text(draw, cell.text, font, max(1, w - 2 * pad_x))
+            line_height = font_px + 4
+            required = len(lines) * line_height
+            if required > h - 2 * pad_y:
+                # Bewaar de tekst: in een uitzonderlijk volle cel alleen tot 24 px verkleinen.
+                font_px = 24
                 font = _font(font_px, bold)
-                lines = _wrap_text(draw, cell.text, font, available_width)
-                line_height = max(1, round(font_px * 1.15))
-                if len(lines)*line_height <= available_height or font_px <= min_font_px:
-                    break
-                font_px -= 1
-            text_y = y + max(2, (h-len(lines)*line_height)//2)
+                lines = _wrap_text(draw, cell.text, font, max(1, w - 2 * pad_x))
+                line_height = font_px + 3
+                required = len(lines) * line_height
+            text_y = y + max(pad_y, (h - required) // 2)
             for line in lines:
-                draw.text((x+pad, text_y), line, font=font, fill=foreground)
+                draw.text((x + pad_x, text_y), line, font=font, fill=foreground)
                 text_y += line_height
             x += w
         y += heights[row_idx]
     name = f"ppt_s{slide_no:03d}_table{image_no:03d}.png"
-    target = images_dir / name
-    image.save(target, format="PNG")
+    image.save(images_dir / name, format="PNG")
     return name, image.width, image.height
 
 
