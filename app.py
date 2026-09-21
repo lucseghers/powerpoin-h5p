@@ -3,7 +3,8 @@ from pathlib import Path
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.enum.text import PP_ALIGN
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
+from pptx.dml.color import RGBColor
 import tempfile
 import zipfile
 import shutil
@@ -135,54 +136,119 @@ def make_text_element(shape, slide_w, slide_h):
 
 
 
-def table_cell_html(cell):
-    """Zet de inhoud van één PowerPoint-tabelcel om naar HTML."""
-    if not getattr(cell, "text_frame", None):
-        return ""
-    return text_frame_html(cell.text_frame)
+def _rgb(color, fallback):
+    """Lees een expliciete PowerPoint RGB-kleur; themakleuren krijgen een fallback."""
+    try:
+        if color is not None and color.rgb is not None:
+            return tuple(bytes(color.rgb))
+    except (AttributeError, TypeError, ValueError):
+        pass
+    return fallback
 
 
-def make_table_element(shape, slide_w, slide_h):
-    """Zet een PowerPoint-tabel om naar een bewerkbare H5P AdvancedText HTML-tabel."""
+def _font(size, bold=False):
+    regular = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    heavy = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    try:
+        return ImageFont.truetype(heavy if bold else regular, max(9, int(size)))
+    except OSError:
+        return ImageFont.load_default()
+
+
+def _wrap_text(draw, text, font, max_width):
+    lines = []
+    for paragraph in text.splitlines() or [""]:
+        words = paragraph.split()
+        if not words:
+            lines.append("")
+            continue
+        line = ""
+        for word in words:
+            candidate = f"{line} {word}" if line else word
+            if line and draw.textlength(candidate, font=font) > max_width:
+                lines.append(line)
+                line = word
+            else:
+                line = candidate
+        lines.append(line)
+    return lines
+
+
+def render_table_png(shape, images_dir, slide_no, image_no):
+    """Rasteriseer uitsluitend de tabel, niet de volledige dia."""
     table = shape.table
-    rows_html = []
-
+    scale = 150 / 914400  # 150 pixels per inch (EMU)
+    widths = [max(1, round(col.width * scale)) for col in table.columns]
+    heights = [max(1, round(row.height * scale)) for row in table.rows]
+    image = Image.new("RGB", (sum(widths), sum(heights)), "white")
+    draw = ImageDraw.Draw(image)
+    y = 0
     for row_idx, row in enumerate(table.rows):
-        cells_html = []
-        tag = "th" if row_idx == 0 else "td"
-        for cell in row.cells:
-            body = table_cell_html(cell)
-            # H5P/CKEditor kan eenvoudige HTML-tabellen bewerken.
-            cells_html.append(
-                f'<{tag} style="border:1px solid #999;padding:6px;vertical-align:top">{body}</{tag}>'
-            )
-        rows_html.append("<tr>" + "".join(cells_html) + "</tr>")
+        x = 0
+        for col_idx, cell in enumerate(row.cells):
+            w, h = widths[col_idx], heights[row_idx]
+            try:
+                fill = _rgb(cell.fill.fore_color, (255, 255, 255))
+            except (AttributeError, TypeError, ValueError):
+                fill = (255, 255, 255)
+            draw.rectangle((x, y, x+w-1, y+h-1), fill=fill, outline=(230, 235, 235), width=1)
+            paragraph = next((p for p in cell.text_frame.paragraphs if p.text.strip()), None)
+            run = next((r for r in paragraph.runs if r.text.strip()), None) if paragraph else None
+            size_pt = run.font.size.pt if run and run.font.size else 12
+            bold = bool(run.font.bold) if run else row_idx == 0
+            foreground = _rgb(run.font.color if run else None, (255,255,255) if row_idx == 0 else (45,52,55))
+            pad = max(6, round(0.10 * 150))
+            available_width = max(1, w-2*pad)
+            available_height = max(1, h-2*pad)
+            font_px = min(36, max(10, round(size_pt * 150 / 72)))
+            while True:
+                font = _font(font_px, bold)
+                lines = _wrap_text(draw, cell.text, font, available_width)
+                line_height = max(1, round(font_px * 1.30))
+                if len(lines)*line_height <= available_height or font_px <= 10:
+                    break
+                font_px -= 1
+            text_y = y + max(pad, (h-len(lines)*line_height)//2)
+            for line in lines:
+                draw.text((x+pad, text_y), line, font=font, fill=foreground)
+                text_y += line_height
+            x += w
+        y += heights[row_idx]
+    name = f"ppt_s{slide_no:03d}_table{image_no:03d}.png"
+    target = images_dir / name
+    image.save(target, format="PNG")
+    return name, image.width, image.height
 
-    table_html = (
-        '<table style="border-collapse:collapse;width:100%">'
-        + "".join(rows_html)
-        + "</table>"
+
+def make_table_element(shape, slide_w, slide_h, images_dir, slide_no, image_no):
+    """Plaats de gerasterde tabel als H5P.Image op de oorspronkelijke positie."""
+    name, px_w, px_h = render_table_png(shape, images_dir, slide_no, image_no)
+    element = common_element_fields(
+        pct(shape.left, slide_w), pct(shape.top, slide_h),
+        pct(shape.width, slide_w), pct(shape.height, slide_h)
     )
-
-    x = pct(shape.left, slide_w)
-    y = pct(shape.top, slide_h)
-    w = pct(shape.width, slide_w)
-    h = pct(shape.height, slide_h)
-
-    element = common_element_fields(x, y, w, h)
     element["action"] = {
-        "library": "H5P.AdvancedText 1.1",
-        "params": {"text": table_html},
+        "library": "H5P.Image 1.1",
+        "params": {
+            "decorative": True,
+            "contentName": "Image",
+            "expandImage": "Expand Image",
+            "minimizeImage": "Minimize Image",
+            "file": {
+                "path": f"images/{name}", "mime": "image/png",
+                "copyright": {"license": "U"},
+                "width": px_w, "height": px_h,
+            },
+        },
         "subContentId": str(uuid.uuid4()),
         "metadata": {
-            "contentType": "Text",
-            "license": "U",
-            "title": shape.name or "PowerPoint tabel",
-            "authors": [],
-            "changes": [],
+            "contentType": "Image", "license": "U",
+            "title": shape.name or "PowerPoint tabel als afbeelding",
+            "authors": [], "changes": [],
         },
     }
     return element
+
 
 def make_image_element(
     shape,
@@ -319,16 +385,21 @@ def convert_pptx_to_h5p(pptx_bytes, template_bytes, pptx_name):
         for slide_no, slide in enumerate(prs.slides, start=1):
             elements = []
             image_no = 0
+            table_no = 0
 
             # python-pptx geeft shapes in z-volgorde terug.
             for shape in slide.shapes:
                 try:
                     if getattr(shape, "has_table", False):
+                        table_no += 1
                         elements.append(
                             make_table_element(
                                 shape,
                                 slide_w,
                                 slide_h,
+                                images_dir,
+                                slide_no,
+                                table_no,
                             )
                         )
                         stats["tabel"] += 1
@@ -431,11 +502,11 @@ st.title("PowerPoint → H5P Course Presentation")
 
 st.write(
     "Zet een PowerPoint om naar een bewerkbare H5P Course Presentation. "
-    "Tekstvakken, afbeeldingen en tabellen worden als afzonderlijke H5P-elementen geplaatst."
+    "Tekstvakken en afbeeldingen blijven afzonderlijke H5P-elementen; tabellen worden als PNG overgenomen."
 )
 
 st.info(
-    "Momenteel worden tekst, afbeeldingen en tabellen ondersteund. "
+    "Momenteel worden tekst en afbeeldingen ondersteund; tabellen worden afbeeldingen. "
     "SmartArt, grafieken, vormen en animaties worden voorlopig overgeslagen."
 )
 
