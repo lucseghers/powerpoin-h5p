@@ -3,6 +3,7 @@ from pathlib import Path
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.enum.text import PP_ALIGN
+from pptx.enum.shapes import PP_PLACEHOLDER
 from PIL import Image, ImageDraw, ImageFont
 from pptx.dml.color import RGBColor
 import tempfile
@@ -24,6 +25,8 @@ st.set_page_config(
 
 APP_DIR = Path(__file__).resolve().parent
 DEFAULT_TEMPLATE = APP_DIR / "templates" / "default_template.h5p"
+DEFAULT_GREEN_BG = APP_DIR / "backgrounds" / "groen.png"
+DEFAULT_YELLOW_BG = APP_DIR / "backgrounds" / "geel.png"
 
 
 # ---------------------------------------------------------
@@ -34,61 +37,72 @@ def pct(value, total):
     return max(0, min(100, value / total * 100))
 
 
-def run_html(run):
-    text = html.escape(run.text).replace("\n", "<br>")
-    if not text:
-        return ""
+def heading_level(shape):
+    """Gebruik PowerPoint-titelplaceholders, niet de tekstinhoud als gok."""
+    if not shape.is_placeholder:
+        return None
+    try:
+        kind = shape.placeholder_format.type
+        if kind in (PP_PLACEHOLDER.TITLE, PP_PLACEHOLDER.CENTER_TITLE):
+            return 1
+        if kind == PP_PLACEHOLDER.SUBTITLE:
+            return 2
+    except (AttributeError, ValueError):
+        pass
+    return None
 
+
+def run_html(run, heading=None):
+    value = html.escape(run.text).replace("\n", "<br>")
+    if not value:
+        return ""
     styles = []
     font = run.font
-
-    if font.size:
+    # PPT-titels erven hun lettergrootte vaak van het diamodel. H5P doet dat
+    # niet: geef die dus expliciet een leesbare grootte en gewicht.
+    if heading:
+        styles.append(f"font-size:{32 if heading == 1 else 24}pt")
+        styles.append("font-weight:700" if heading == 1 else "font-weight:600")
+        styles.append("line-height:1.15")
+    elif font.size:
         styles.append(f"font-size:{font.size.pt:.1f}pt")
-
     try:
         if font.color and font.color.type is not None and font.color.rgb:
             styles.append(f"color:#{font.color.rgb}")
     except Exception:
         pass
-
     if font.bold:
-        text = f"<strong>{text}</strong>"
+        value = f"<strong>{value}</strong>"
     if font.italic:
-        text = f"<em>{text}</em>"
+        value = f"<em>{value}</em>"
     if font.underline:
-        text = f'<span style="text-decoration:underline">{text}</span>'
-
+        value = f'<span style="text-decoration:underline">{value}</span>'
     if styles:
-        text = f'<span style="{";".join(styles)}">{text}</span>'
+        value = f'<span style="{";".join(styles)}">{value}</span>'
+    return value
 
-    return text
 
-
-def paragraph_html(p):
-    body = "".join(run_html(r) for r in p.runs)
-
+def paragraph_html(p, heading=None):
+    body = "".join(run_html(r, heading=heading) for r in p.runs)
     if not body:
         body = html.escape(p.text)
-
     styles = []
-
     if p.alignment == PP_ALIGN.CENTER:
         styles.append("text-align:center")
     elif p.alignment == PP_ALIGN.RIGHT:
         styles.append("text-align:right")
     elif p.alignment == PP_ALIGN.JUSTIFY:
         styles.append("text-align:justify")
-
+    if heading:
+        styles.append("margin:0")
+        styles.append("line-height:1.15")
     style = f' style="{";".join(styles)}"' if styles else ""
-    return f"<p{style}>{body}</p>"
+    tag = f"h{heading}" if heading else "p"
+    return f"<{tag}{style}>{body}</{tag}>"
 
 
-def text_frame_html(tf):
-    return "".join(
-        paragraph_html(p)
-        for p in tf.paragraphs
-        if p.text.strip()
-    )
+def text_frame_html(tf, heading=None):
+    return "".join(paragraph_html(p, heading=heading) for p in tf.paragraphs if p.text.strip())
 
 
 def common_element_fields(x, y, w, h):
@@ -113,7 +127,7 @@ def make_text_element(shape, slide_w, slide_h):
     w = pct(shape.width, slide_w)
     h = pct(shape.height, slide_h)
 
-    text = text_frame_html(shape.text_frame)
+    text = text_frame_html(shape.text_frame, heading=heading_level(shape))
 
     element = common_element_fields(x, y, w, h)
 
@@ -126,7 +140,7 @@ def make_text_element(shape, slide_w, slide_h):
         "metadata": {
             "contentType": "Text",
             "license": "U",
-            "title": shape.name or "PowerPoint tekst",
+            "title": ("PowerPoint hoofding" if heading_level(shape) else (shape.name or "PowerPoint tekst")),
             "authors": [],
             "changes": [],
         },
@@ -599,12 +613,12 @@ def convert_pptx_to_h5p(pptx_bytes, template_bytes, pptx_name, backgrounds=None,
 # ---------------------------------------------------------
 
 st.title("PowerPoint → H5P Course Presentation")
-st.caption("Versie 1.7 – eigen achtergrondafbeeldingen per dia")
+st.caption("Versie 1.8 – duidelijke titels en vaste achtergrondafbeeldingen")
 
 st.write(
     "Zet een PowerPoint om naar een bewerkbare H5P Course Presentation. "
     "Tekstvakken en afbeeldingen blijven afzonderlijke H5P-elementen; tabellen worden als PNG overgenomen. "
-    "Je kunt een eigen groene en gele achtergrond per dia toepassen."
+    "De vaste groene en gele achtergronden kunnen per dia worden toegepast."
 )
 
 st.info(
@@ -647,7 +661,13 @@ else:
         )
 
 
-st.subheader("3. Achtergrondafbeeldingen (optioneel)")
+st.subheader("3. Achtergrondafbeeldingen")
+st.caption("Standaard worden backgrounds/groen.png en backgrounds/geel.png uit GitHub gebruikt. Je kunt ze hieronder tijdelijk vervangen.")
+for label, path in (("Groene", DEFAULT_GREEN_BG), ("Gele", DEFAULT_YELLOW_BG)):
+    if path.is_file():
+        st.success(f"{label} achtergrond standaard geladen: {path.name}")
+    else:
+        st.info(f"Geen vaste {label.lower()} achtergrond gevonden in backgrounds/{path.name}.")
 st.caption("Upload PNG/JPG-afbeeldingen in dezelfde verhouding als je dia (bijvoorbeeld 16:9). De afbeeldingen komen achter de H5P-elementen.")
 green_file = st.file_uploader("Groene achtergrond", type=["png", "jpg", "jpeg"], key="green_bg")
 yellow_file = st.file_uploader("Gele achtergrond", type=["png", "jpg", "jpeg"], key="yellow_bg")
@@ -698,8 +718,8 @@ if st.button(
                 template_bytes,
                 ppt_file.name,
                 backgrounds={
-                    "groen": green_file.getvalue() if green_file else None,
-                    "geel": yellow_file.getvalue() if yellow_file else None,
+                    "groen": green_file.getvalue() if green_file else (DEFAULT_GREEN_BG.read_bytes() if DEFAULT_GREEN_BG.is_file() else None),
+                    "geel": yellow_file.getvalue() if yellow_file else (DEFAULT_YELLOW_BG.read_bytes() if DEFAULT_YELLOW_BG.is_file() else None),
                 },
                 mode="manual" if mode == "Zelf dianummers opgeven" else "auto",
                 green_spec=green_spec,
